@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PinchPlan – Hands-First Spatial Focus Desk</title>
+<meta name="description" content="A seated, hands-first mixed-reality task board and focus timer for Meta Quest, built with WebXR.">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  body { background: radial-gradient(circle at 30% 20%, #1e293b, #0b1020 70%); color: #e2e8f0; }
+  canvas { display: block; touch-action: none; }
+  #ui { position: fixed; top: 16px; left: 16px; width: min(360px, calc(100vw - 32px)); background: rgba(15,23,42,.88);
+        border: 1px solid #334155; border-radius: 16px; padding: 16px 18px; box-shadow: 0 10px 40px rgba(0,0,0,.4); }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  h1 span { color: #38bdf8; }
+  p { margin: 6px 0; font-size: 14px; line-height: 1.45; color: #cbd5e1; }
+  #enterXR { width: 100%; margin-top: 10px; padding: 12px; font-size: 16px; font-weight: 700; border: 0; border-radius: 10px;
+             background: linear-gradient(90deg,#0ea5e9,#6366f1); color: white; cursor: pointer; }
+  #enterXR:disabled { opacity: .45; cursor: not-allowed; }
+  form { display: flex; gap: 6px; margin-top: 10px; }
+  input { flex: 1; padding: 9px 10px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #e2e8f0; font-size: 14px; }
+  form button { padding: 9px 12px; border-radius: 8px; border: 0; background: #334155; color: #e2e8f0; font-weight: 600; cursor: pointer; }
+  #status { font-size: 13px; color: #fbbf24; }
+  details { margin-top: 8px; font-size: 13px; color: #cbd5e1; }
+  details ul { padding-left: 18px; margin: 6px 0; }
+  #toggleUi { position: absolute; top: 10px; right: 12px; background: none; border: 0; color: #94a3b8; font-size: 18px; cursor: pointer; }
+  #ui.min > :not(h1):not(#toggleUi) { display: none; }
+</style>
+<script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.169.0/build/three.module.js" } }</script>
+</head>
+<body>
+<div id="ui">
+  <button id="toggleUi" title="Minimise">–</button>
+  <h1>Pinch<span>Plan</span></h1>
+  <p>A seated, <b>hands-first</b> mixed-reality focus desk. Pinch, pull and pin your tasks, then squeeze into focus with the timer orb.</p>
+  <button id="enterXR">Enter Mixed Reality</button>
+  <p id="status"></p>
+  <form id="addForm"><input id="taskInput" maxlength="30" placeholder="Add a task before you start…" autocomplete="off"><button>Add</button></form>
+  <details open>
+    <summary>How to use (hands only – no controllers needed)</summary>
+    <ul>
+      <li><b>Pinch</b> a card quickly → moves it to the next lane.</li>
+      <li><b>Pinch &amp; drag</b> a card → move it between <i>Next up / Now / Done</i>.</li>
+      <li>Drag a card <b>below the board</b> → delete it.</li>
+      <li><b>Pinch the orb</b> → start / pause a focus session (5, 15 or 25 min).</li>
+      <li>Turn your <b>left palm up</b> → wrist menu (add task, clear done, recenter).</li>
+    </ul>
+    Works seated in a two-foot radius. Everything is saved on this device.
+  </details>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+
+/* ---------------- state ---------------- */
+const STORE = 'pinchplan.v1';
+const LANES = ['Next up', 'Now', 'Done'];
+const LANE_X = [-0.185, 0, 0.185];
+const LANE_COLORS = ['#475569', '#0891b2', '#16a34a'];
+const QUICK = ['Plan my day', 'Reply to emails', 'Review code', 'Stretch 2 min', 'Read 10 pages', 'Drink water',
+               'Write notes', 'Call back', 'Tidy desk', 'Learn something new', 'Deep work block', 'Inbox zero'];
+const today = () => new Date().toISOString().slice(0, 10);
+
+function load() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORE));
+    if (s && Array.isArray(s.tasks)) { if (s.day !== today()) { s.day = today(); s.sessions = 0; } return s; }
+  } catch (e) {}
+  return { tasks: [
+      { id: 1, text: 'Plan my day', lane: 1 }, { id: 2, text: 'Reply to emails', lane: 0 },
+      { id: 3, text: 'Review code', lane: 0 }, { id: 4, text: 'Stretch 2 min', lane: 0 },
+      { id: 5, text: 'Drink water', lane: 2 } ],
+    nextId: 6, sessions: 0, day: today(), minutes: 25, quickIdx: 5 };
+}
+const state = load();
+function save() { try { localStorage.setItem(STORE, JSON.stringify(state)); } catch (e) {} }
+
+/* ---------------- audio ---------------- */
+let actx;
+function ac() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} } return actx; }
+function beep(f = 520, d = 0.07, v = 0.07) {
+  const a = ac(); if (!a) return;
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = 'sine'; o.frequency.value = f;
+  g.gain.setValueAtTime(v, a.currentTime); g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + d);
+  o.connect(g).connect(a.destination); o.start(); o.stop(a.currentTime + d + 0.02);
+}
+function chime() { [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => beep(f, 0.6, 0.09), i * 170)); }
+
+/* ---------------- three setup ---------------- */
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.01, 50);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x334155, 2.2));
+const dl = new THREE.DirectionalLight(0xffffff, 1.4); dl.position.set(0.5, 1, 0.6); scene.add(dl);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ---------------- canvas helpers ---------------- */
+const PPM = 2400; // canvas pixels per metre
+function canvasPlane(w, h) {
+  const c = document.createElement('canvas');
+  c.width = Math.round(w * PPM); c.height = Math.round(h * PPM);
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, transparent: true }));
+  m.userData.canvas = c; m.userData.tex = tex; m.userData.w = w; m.userData.h = h;
+  return m;
+}
+function rr(g, x, y, w, h, r) {
+  g.beginPath(); g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+function fit(g, text, maxW) {
+  if (g.measureText(text).width <= maxW) return text;
+  let t = text; while (t.length > 1 && g.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+  return t + '…';
+}
+
+/* ---------------- interactables ---------------- */
+const interactables = [];
+function isShown(o) { while (o) { if (!o.visible) return false; o = o.parent; } return true; }
+
+function makeButton(text, w, h, onPress, color = '#2563eb') {
+  const m = canvasPlane(w, h);
+  Object.assign(m.userData, { type: 'button', text, onPress, color, redraw: drawButton });
+  drawButton(m); interactables.push(m); return m;
+}
+function drawButton(m) {
+  const { canvas: c, tex, hover, color, text } = m.userData, g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+  rr(g, 3, 3, c.width - 6, c.height - 6, c.height * 0.32);
+  g.fillStyle = color; g.fill();
+  if (hover) { g.fillStyle = 'rgba(255,255,255,.28)'; g.fill(); g.lineWidth = 6; g.strokeStyle = '#fff'; g.stroke(); }
+  g.fillStyle = '#fff'; g.font = `600 ${Math.round(c.height * 0.44)}px system-ui, sans-serif`;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(fit(g, text, c.width - 20), c.width / 2, c.height / 2 + 2);
+  tex.needsUpdate = true;
+}
+
+/* ---------------- board ---------------- */
+const board = new THREE.Group(); scene.add(board);
+const BW = 0.6, BH = 0.37;
+const bg = canvasPlane(BW, BH); bg.position.z = -0.002; board.add(bg);
+const toPx = (x, y) => [(x + BW / 2) * PPM, (BH / 2 - y) * PPM];
+const LANE_TOP = 0.108, CARD_TOP = 0.072, CARD_STEP = 0.049, MAXV = 5;
+
+function drawBoard() {
+  const c = bg.userData.canvas, g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+  rr(g, 4, 4, c.width - 8, c.height - 8, 60); g.fillStyle = 'rgba(12,18,34,0.82)'; g.fill();
+  g.lineWidth = 4; g.strokeStyle = 'rgba(148,163,184,.35)'; g.stroke();
+  // header
+  let [x, y] = toPx(-0.28, 0.148);
+  g.fillStyle = '#e2e8f0'; g.font = '700 58px system-ui'; g.textBaseline = 'middle'; g.textAlign = 'left';
+  g.fillText('Pinch', x, y); const pw = g.measureText('Pinch').width; g.fillStyle = '#38bdf8'; g.fillText('Plan', x + pw, y);
+  g.fillStyle = '#94a3b8'; g.font = '400 30px system-ui';
+  const doneCount = state.tasks.filter(t => t.lane === 2).length;
+  g.fillText(`${doneCount} done · ${state.sessions} focus`, x + 330, y + 4);
+  // lanes
+  const counts = [0, 0, 0]; state.tasks.forEach(t => counts[t.lane]++);
+  LANES.forEach((name, i) => {
+    const [lx, ly] = toPx(LANE_X[i] - 0.085, LANE_TOP + 0.012);
+    const [, lb] = toPx(0, -0.158);
+    rr(g, lx, ly, 0.17 * PPM, lb - ly, 28); g.fillStyle = 'rgba(30,41,59,0.75)'; g.fill();
+    g.fillStyle = LANE_COLORS[i]; rr(g, lx, ly, 0.17 * PPM, 10, 5); g.fill();
+    g.fillStyle = '#e2e8f0'; g.font = '600 32px system-ui'; g.textAlign = 'left';
+    g.fillText(name, lx + 20, ly + 36);
+    g.fillStyle = '#94a3b8'; g.textAlign = 'right'; g.fillText(String(counts[i]), lx + 0.17 * PPM - 20, ly + 36);
+    if (counts[i] > MAXV) {
+      g.textAlign = 'center'; g.font = '400 26px system-ui'; g.fillStyle = '#94a3b8';
+      g.fillText(`+${counts[i] - MAXV} more`, lx + 0.085 * PPM, lb - 20);
+    }
+  });
+  // footer hint
+  [x, y] = toPx(0, -0.172);
+  g.textAlign = 'center'; g.fillStyle = '#64748b'; g.font = '400 24px system-ui';
+  g.fillText('Pinch card = next lane · Pinch & drag = move · Drag below board = delete · Left palm up = menu', x, y);
+  bg.userData.tex.needsUpdate = true;
+}
+
+/* ---------------- cards ---------------- */
+const CW = 0.155, CH = 0.042;
+const cardMeshes = new Map();
+function cardMesh(task) {
+  let m = cardMeshes.get(task.id);
+  if (!m) {
+    m = canvasPlane(CW, CH);
+    Object.assign(m.userData, { type: 'card', target: new THREE.Vector3(), redraw: drawCard });
+    m.position.set(LANE_X[task.lane], CARD_TOP + 0.05, 0.03);
+    board.add(m); interactables.push(m); cardMeshes.set(task.id, m);
+  }
+  m.userData.task = task; drawCard(m); return m;
+}
+function drawCard(m) {
+  const { canvas: c, tex, hover, task, grabbed } = m.userData, g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+  rr(g, 3, 3, c.width - 6, c.height - 6, 22);
+  g.fillStyle = task.lane === 2 ? '#14532d' : task.lane === 1 ? '#164e63' : '#1e293b'; g.fill();
+  g.lineWidth = hover || grabbed ? 7 : 3; g.strokeStyle = hover || grabbed ? '#f8fafc' : 'rgba(148,163,184,.5)'; g.stroke();
+  g.fillStyle = LANE_COLORS[task.lane]; rr(g, 3, 3, 16, c.height - 6, 8); g.fill();
+  g.fillStyle = task.lane === 2 ? '#86efac' : '#f1f5f9'; g.font = '500 36px system-ui';
+  g.textAlign = 'left'; g.textBaseline = 'middle';
+  const label = (task.lane === 2 ? '✓ ' : '') + task.text;
+  g.fillText(fit(g, label, c.width - 50), 34, c.height / 2 + 2);
+  tex.needsUpdate = true;
+}
+function layout() {
+  const ids = new Set(state.tasks.map(t => t.id));
+  for (const [id, m] of cardMeshes) {
+    if (!ids.has(id)) {
+      board.remove(m); interactables.splice(interactables.indexOf(m), 1);
+      m.geometry.dispose(); m.material.map.dispose(); m.material.dispose(); cardMeshes.delete(id);
+    }
+  }
+  const counts = [0, 0, 0];
+  for (const t of state.tasks) {
+    const m = cardMesh(t), i = counts[t.lane]++;
+    m.userData.target.set(LANE_X[t.lane], CARD_TOP - i * CARD_STEP, 0.01);
+    m.visible = i < MAXV;
+  }
+  drawBoard(); save();
+}
+function addTask(text) {
+  text = (text || QUICK[state.quickIdx++ % QUICK.length]).trim().slice(0, 30);
+  if (!text) return;
+  state.tasks.push({ id: state.nextId++, text, lane: 0 }); layout();
+}
+function advance(task) {
+  task.lane = (task.lane + 1) % 3;
+  const t = state.tasks.splice(state.tasks.indexOf(task), 1)[0]; state.tasks.push(t);
+  if (task.lane === 2) beep(988, 0.12, 0.07);
+  layout();
+}
+function drop(m) {
+  const task = m.userData.task, p = m.position;
+  if (p.y < -0.2) { state.tasks.splice(state.tasks.indexOf(task), 1); beep(220, 0.15, 0.08); layout(); return; }
+  let lane = 0, best = 1e9;
+  LANE_X.forEach((x, i) => { const d = Math.abs(p.x - x); if (d < best) { best = d; lane = i; } });
+  state.tasks.splice(state.tasks.indexOf(task), 1);
+  const laneTasks = state.tasks.filter(t => t.lane === lane);
+  const idx = Math.max(0, Math.min(laneTasks.length, Math.round((CARD_TOP - p.y) / CARD_STEP)));
+  const was = task.lane; task.lane = lane;
+  if (idx < laneTasks.length) state.tasks.splice(state.tasks.indexOf(laneTasks[idx]), 0, task); else state.tasks.push(task);
+  if (lane === 2 && was !== 2) beep(988, 0.12, 0.07);
+  layout();
+}
+function clearDone() { state.tasks = state.tasks.filter(t => t.lane !== 2); beep(330, 0.1); layout(); }
+
+const addBtn = makeButton('+ Add task', 0.12, 0.034, () => addTask(), '#2563eb');
+addBtn.position.set(0.215, 0.148, 0.004); board.add(addBtn);
+const clearBtn = makeButton('Clear done', 0.11, 0.034, clearDone, '#15803d');
+clearBtn.position.set(0.085, 0.148, 0.004); board.add(clearBtn);
+
+/* ---------------- focus orb ---------------- */
+const orbGroup = new THREE.Group(); orbGroup.position.set(0.40, 0.02, 0.03); board.add(orbGroup);
+const orbMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0ea5e9, emissiveIntensity: 0.6, roughness: 0.25, metalness: 0.1, transparent: true, opacity: 0.92 });
+const orb = new THREE.Mesh(new THREE.SphereGeometry(0.04, 48, 32), orbMat);
+Object.assign(orb.userData, { type: 'button', radius: 0.05, noScale: true, onPress: toggleTimer, redraw: () => {} });
+orbGroup.add(orb); interactables.push(orb);
+const halo = new THREE.Mesh(new THREE.RingGeometry(0.047, 0.052, 64), new THREE.MeshBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.5, side: THREE.DoubleSide }));
+orbGroup.add(halo);
+const orbLabel = canvasPlane(0.15, 0.06); orbLabel.position.set(0, 0.085, 0); orbGroup.add(orbLabel);
+const presetBtns = [5, 15, 25].map((min, i) => {
+  const b = makeButton(`${min}m`, 0.042, 0.03, () => setMinutes(min), '#334155');
+  b.position.set((i - 1) * 0.048, -0.07, 0); orbGroup.add(b); return b;
+});
+const resetBtn = makeButton('Reset', 0.09, 0.028, resetTimer, '#7c2d12'); resetBtn.position.set(0, -0.106, 0); orbGroup.add(resetBtn);
+
+const timer = { running: false, remaining: state.minutes * 60, done: false, shown: -1 };
+function setMinutes(min) {
+  state.minutes = min; save();
+  presetBtns.forEach((b, i) => { b.userData.color = [5, 15, 25][i] === min ? '#0369a1' : '#334155'; drawButton(b); });
+  if (!timer.running) { timer.remaining = min * 60; timer.done = false; drawOrbLabel(); }
+}
+function toggleTimer() {
+  if (timer.done) { timer.done = false; timer.remaining = state.minutes * 60; }
+  timer.running = !timer.running; beep(timer.running ? 660 : 440, 0.12); drawOrbLabel();
+}
+function resetTimer() { timer.running = false; timer.done = false; timer.remaining = state.minutes * 60; drawOrbLabel(); }
+function drawOrbLabel() {
+  const c = orbLabel.userData.canvas, g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+  const s = Math.ceil(timer.remaining), mm = String(Math.floor(s / 60)).padStart(2, '0'), ss = String(s % 60).padStart(2, '0');
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = '#f8fafc'; g.font = '700 70px ui-monospace, monospace'; g.fillText(`${mm}:${ss}`, c.width / 2, c.height * 0.38);
+  g.fillStyle = timer.done ? '#f9a8d4' : timer.running ? '#5eead4' : '#94a3b8'; g.font = '500 28px system-ui';
+  g.fillText(timer.done ? 'Session complete! Pinch orb' : timer.running ? 'Focusing… pinch to pause' : 'Pinch orb to focus', c.width / 2, c.height * 0.8);
+  orbLabel.userData.tex.needsUpdate = true; timer.shown = s;
+}
+function updateTimer(dt) {
+  if (timer.running) {
+    timer.remaining -= dt;
+    if (timer.remaining <= 0) {
+      timer.remaining = 0; timer.running = false; timer.done = true;
+      state.sessions++; save(); drawBoard(); chime(); drawOrbLabel();
+    }
+  }
+  if (Math.ceil(timer.remaining) !== timer.shown) drawOrbLabel();
+}
+const cIdle = new THREE.Color(0x0ea5e9), cRun = new THREE.Color(0x14b8a6), cPause = new THREE.Color(0xf59e0b), cDone = new THREE.Color(0xec4899);
+function updateOrb(t) {
+  const s = t / 1000;
+  const paused = !timer.running && !timer.done && timer.remaining < state.minutes * 60;
+  const col = timer.done ? cDone : timer.running ? cRun : paused ? cPause : cIdle;
+  orbMat.emissive.lerp(col, 0.08); orbMat.color.lerp(col, 0.08);
+  const pulse = timer.running ? 1 + 0.06 * Math.sin(s * 2.1) : timer.done ? 1 + 0.1 * Math.abs(Math.sin(s * 4)) : 1;
+  const hov = orb.userData.hover ? 1.1 : 1;
+  orb.scale.setScalar(THREE.MathUtils.lerp(orb.scale.x, pulse * hov, 0.2));
+  orbMat.emissiveIntensity = orb.userData.hover ? 1.2 : 0.6;
+  const frac = timer.remaining / (state.minutes * 60);
+  halo.scale.setScalar(1 + (1 - frac) * 0.25); halo.material.opacity = timer.running ? 0.6 : 0.3;
+  halo.rotation.z = s * 0.3;
+}
+
+/* ---------------- wrist menu ---------------- */
+const menu = new THREE.Group(); menu.visible = false; scene.add(menu);
+[['+ Add task', () => addTask(), '#2563eb'], ['Focus start/pause', toggleTimer, '#0f766e'],
+ ['Clear done', clearDone, '#15803d'], ['Recenter board', () => recenter(), '#6d28d9']].forEach(([t, fn, col], i) => {
+  const b = makeButton(t, 0.12, 0.03, fn, col); b.userData.menu = true; b.position.set(0, 0.055 - i * 0.036, 0); menu.add(b);
+});
+
+/* ---------------- placement ---------------- */
+const tmpV = new THREE.Vector3(), tmpV2 = new THREE.Vector3(), tmpQ = new THREE.Quaternion();
+function recenter() {
+  const cam = renderer.xr.isPresenting ? renderer.xr.getCamera() : camera;
+  cam.getWorldPosition(tmpV); cam.getWorldDirection(tmpV2); tmpV2.y = 0;
+  if (tmpV2.lengthSq() < 1e-4) tmpV2.set(0, 0, -1);
+  tmpV2.normalize();
+  board.position.copy(tmpV).addScaledVector(tmpV2, 0.5); board.position.y = tmpV.y - 0.2;
+  board.lookAt(tmpV.x, board.position.y, tmpV.z); board.rotateX(-0.4);
+}
+function desktopPose() { board.position.set(innerWidth > 900 ? 0.1 : -0.04, -0.02, -0.72); board.rotation.set(0, 0, 0); }
+desktopPose();
+
+/* ---------------- generic pointer logic ---------------- */
+function hitDistance(m, pWorld) {
+  const l = m.worldToLocal(tmpV.copy(pWorld));
+  if (m.userData.radius) return Math.max(l.length() - m.userData.radius, 0);
+  const dx = Math.max(Math.abs(l.x) - m.userData.w / 2, 0), dy = Math.max(Math.abs(l.y) - m.userData.h / 2, 0);
+  return Math.hypot(dx, dy, l.z);
+}
+function pressStart(ptr, target, worldPt) {
+  if (!target) return;
+  if (!target.userData.noScale) target.scale.setScalar(0.9);
+  if (target.userData.type === 'card') {
+    if (target.userData.grabbed) return;
+    const lp = board.worldToLocal(worldPt.clone());
+    ptr.grab = target; ptr.offset = lp.sub(target.position); ptr.offset.z = 0;
+    ptr.startPos = target.position.clone(); ptr.startT = performance.now();
+    target.userData.grabbed = true; drawCard(target); beep(700, 0.04, 0.05);
+  } else { beep(880, 0.05, 0.06); target.userData.onPress && target.userData.onPress(); }
+}
+function pressMove(ptr, worldPt) {
+  if (!ptr.grab) return;
+  const lp = board.worldToLocal(worldPt.clone()).sub(ptr.offset);
+  ptr.grab.position.set(lp.x, lp.y, 0.035);
+}
+function pressEnd(ptr) {
+  const m = ptr.grab; if (!m) return;
+  ptr.grab = null; m.userData.grabbed = false;
+  const quick = performance.now() - ptr.startT < 400 && m.position.distanceTo(ptr.startPos) < 0.015;
+  if (quick) advance(m.userData.task); else drop(m);
+}
+const pointers = [];
+
+/* ---------------- hands ---------------- */
+const jointGeo = new THREE.SphereGeometry(1, 10, 8);
+const jointMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, transparent: true, opacity: 0.55, roughness: 0.5 });
+const tipMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8 });
+const hands = [0, 1].map(i => {
+  const h = renderer.xr.getHand(i); scene.add(h);
+  const cursor = new THREE.Mesh(new THREE.RingGeometry(0.007, 0.01, 24), new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide }));
+  cursor.visible = false; scene.add(cursor);
+  const hs = { kind: 'hand', h, idx: i, handed: '', pinching: false, grab: null, hover: null, palmT: 0, cursor, pinchPt: new THREE.Vector3() };
+  h.addEventListener('connected', e => { hs.handed = e.data.handedness || ''; });
+  h.addEventListener('disconnected', () => { pressEnd(hs); hs.pinching = false; cursor.visible = false; });
+  pointers.push(hs); return hs;
+});
+let menuHand = null;
+const vA = new THREE.Vector3(), vB = new THREE.Vector3(), up = new THREE.Vector3();
+
+function nearest(pt, excludeMenu) {
+  let best = null, bd = 0.028;
+  for (const m of interactables) {
+    if (!isShown(m) || (excludeMenu && m.userData.menu) || m.userData.grabbed) continue;
+    const d = hitDistance(m, pt); if (d < bd) { bd = d; best = m; }
+  }
+  return best;
+}
+function updateHands(dt) {
+  for (const hs of hands) {
+    const j = hs.h.joints, it = j['index-finger-tip'], tt = j['thumb-tip'];
+    for (const k in j) {
+      const jt = j[k];
+      if (!jt.userData.vis) {
+        const s = new THREE.Mesh(jointGeo, k.endsWith('tip') ? tipMat : jointMat);
+        s.scale.setScalar((jt.jointRadius || 0.008) * 0.9); jt.add(s); jt.userData.vis = s;
+      }
+    }
+    if (!it || !tt || !it.visible || !tt.visible) { if (hs.grab) pressEnd(hs); hs.pinching = false; hs.cursor.visible = false; hs.hover = null; continue; }
+    it.getWorldPosition(vA); tt.getWorldPosition(vB);
+    const d = vA.distanceTo(vB);
+    hs.pinchPt.copy(vA).add(vB).multiplyScalar(0.5);
+    const excl = menuHand === hs;
+    if (!hs.pinching) hs.hover = nearest(hs.pinchPt, excl);
+    if (!hs.pinching && d < 0.02) { hs.pinching = true; pressStart(hs, hs.hover, hs.pinchPt); hs.hover = null; }
+    else if (hs.pinching && d > 0.04) { hs.pinching = false; pressEnd(hs); }
+    if (hs.pinching) pressMove(hs, hs.pinchPt);
+    // cursor
+    hs.cursor.visible = true; hs.cursor.position.copy(hs.pinchPt);
+    hs.cursor.lookAt(renderer.xr.getCamera().getWorldPosition(tmpV2));
+    const sc = hs.pinching ? 0.6 : THREE.MathUtils.clamp(d / 0.05, 0.6, 1.6); hs.cursor.scale.setScalar(sc);
+    hs.cursor.material.color.set(hs.pinching ? 0xfacc15 : hs.hover ? 0x22c55e : 0x38bdf8);
+    // palm-up detection (wrist -Y is palm normal in WebXR)
+    const w = j['wrist'];
+    if (w && w.visible) {
+      w.getWorldQuaternion(tmpQ); up.set(0, -1, 0).applyQuaternion(tmpQ);
+      const palmUp = up.y > 0.6 && !hs.pinching && hs.handed !== 'right';
+      hs.palmT = palmUp ? Math.min(hs.palmT + dt, 1) : Math.max(hs.palmT - dt, 0);
+      if (!menuHand && hs.palmT > 0.25) menuHand = hs;
+      if (menuHand === hs && hs.palmT <= 0) menuHand = null;
+      if (menuHand === hs) {
+        w.getWorldPosition(tmpV); menu.position.copy(tmpV).add(new THREE.Vector3(0, 0.1, 0));
+        const cp = renderer.xr.getCamera().getWorldPosition(tmpV2);
+        menu.lookAt(cp.x, menu.position.y, cp.z);
+      }
+    }
+  }
+  menu.visible = !!menuHand;
+}
+
+/* ---------------- controllers & mouse (fallbacks) ---------------- */
+const ray = new THREE.Raycaster(), plane = new THREE.Plane();
+function rayHit(r) {
+  const objs = interactables.filter(m => isShown(m) && !m.userData.grabbed);
+  const hits = r.intersectObjects(objs, false); return hits[0] || null;
+}
+function rayPlanePoint(r, out) {
+  board.getWorldQuaternion(tmpQ); tmpV2.set(0, 0, 1).applyQuaternion(tmpQ);
+  plane.setFromNormalAndCoplanarPoint(tmpV2, board.getWorldPosition(tmpV));
+  return r.ray.intersectPlane(plane, out);
+}
+const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1)]);
+for (let i = 0; i < 2; i++) {
+  const c = renderer.xr.getController(i); scene.add(c);
+  const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x38bdf8 })); line.scale.z = 2; line.visible = false; c.add(line);
+  const ptr = { kind: 'ctrl', c, line, active: false, grab: null, hover: null };
+  c.addEventListener('connected', e => { ptr.active = !e.data.hand; line.visible = ptr.active; });
+  c.addEventListener('disconnected', () => { ptr.active = false; line.visible = false; pressEnd(ptr); });
+  c.addEventListener('selectstart', () => { if (!ptr.active) return; setRay(ptr); const h = rayHit(ray); if (h) pressStart(ptr, h.object, h.point); });
+  c.addEventListener('selectend', () => { if (ptr.active) pressEnd(ptr); });
+  pointers.push(ptr);
+}
+function setRay(ptr) {
+  ray.ray.origin.setFromMatrixPosition(ptr.c.matrixWorld);
+  ray.ray.direction.set(0, 0, -1).transformDirection(ptr.c.matrixWorld);
+}
+function updateControllers() {
+  for (const p of pointers) {
+    if (p.kind !== 'ctrl' || !p.active) continue;
+    setRay(p);
+    if (p.grab) { const pt = rayPlanePoint(ray, new THREE.Vector3()); if (pt) pressMove(p, pt); p.hover = null; }
+    else { const h = rayHit(ray); p.hover = h ? h.object : null; }
+  }
+}
+const mouse = { kind: 'mouse', grab: null, hover: null }; pointers.push(mouse);
+const ndc = new THREE.Vector2();
+function mouseRay(e) { ndc.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); ray.setFromCamera(ndc, camera); }
+renderer.domElement.addEventListener('pointerdown', e => { if (renderer.xr.isPresenting) return; ac(); mouseRay(e); const h = rayHit(ray); if (h) { pressStart(mouse, h.object, h.point); renderer.domElement.setPointerCapture(e.pointerId); } });
+renderer.domElement.addEventListener('pointermove', e => {
+  if (renderer.xr.isPresenting) return; mouseRay(e);
+  if (mouse.grab) { const pt = rayPlanePoint(ray, new THREE.Vector3()); if (pt) pressMove(mouse, pt); mouse.hover = null; }
+  else { const h = rayHit(ray); mouse.hover = h ? h.object : null; renderer.domElement.style.cursor = mouse.hover ? 'pointer' : 'default'; }
+});
+renderer.domElement.addEventListener('pointerup', () => pressEnd(mouse));
+
+/* ---------------- hover + animation ---------------- */
+function updateHover() {
+  const hovered = new Set(pointers.map(p => p.hover).filter(Boolean));
+  for (const m of interactables) {
+    const h = hovered.has(m);
+    if (!!m.userData.hover !== h) { m.userData.hover = h; m.userData.redraw(m); }
+  }
+}
+function updateCards(dt) {
+  const k = 1 - Math.exp(-dt * 14);
+  for (const m of cardMeshes.values()) if (!m.userData.grabbed) m.position.lerp(m.userData.target, k);
+  for (const m of interactables) if (!m.userData.noScale && m.scale.x < 1) m.scale.setScalar(Math.min(1, m.scale.x + dt * 1.5));
+}
+
+/* ---------------- XR session ---------------- */
+const enterBtn = document.getElementById('enterXR'), statusEl = document.getElementById('status');
+let xrMode = null, frames = 0, needRecenter = false;
+async function detect() {
+  if (!navigator.xr) { statusEl.textContent = 'WebXR not available here. Open this page in the Meta Quest Browser – you can still try the board with your mouse.'; enterBtn.disabled = true; return; }
+  try {
+    if (await navigator.xr.isSessionSupported('immersive-ar')) xrMode = 'immersive-ar';
+    else if (await navigator.xr.isSessionSupported('immersive-vr')) xrMode = 'immersive-vr';
+  } catch (e) {}
+  if (!xrMode) { statusEl.textContent = 'No immersive XR device found. Try the board with your mouse, or open on Meta Quest.'; enterBtn.disabled = true; }
+  else enterBtn.textContent = xrMode === 'immersive-ar' ? 'Enter Mixed Reality' : 'Enter VR';
+}
+detect();
+enterBtn.addEventListener('click', async () => {
+  ac();
+  try {
+    const session = await navigator.xr.requestSession(xrMode, { optionalFeatures: ['hand-tracking', 'local-floor'] });
+    renderer.xr.setReferenceSpaceType('local');
+    await renderer.xr.setSession(session);
+    scene.background = xrMode === 'immersive-vr' ? new THREE.Color(0x0b1020) : null;
+    frames = 0; needRecenter = true;
+    session.addEventListener('end', () => { scene.background = null; menuHand = null; menu.visible = false; desktopPose(); });
+  } catch (e) { statusEl.textContent = 'Could not start XR: ' + e.message; }
+});
+
+/* ---------------- HTML form ---------------- */
+document.getElementById('addForm').addEventListener('submit', e => {
+  e.preventDefault(); const inp = document.getElementById('taskInput');
+  if (inp.value.trim()) { addTask(inp.value); inp.value = ''; }
+});
+document.getElementById('toggleUi').addEventListener('click', e => {
+  const ui = document.getElementById('ui'); ui.classList.toggle('min'); e.target.textContent = ui.classList.contains('min') ? '+' : '–';
+});
+
+/* ---------------- loop ---------------- */
+setMinutes(state.minutes); layout(); drawOrbLabel();
+const clock = new THREE.Clock();
+renderer.setAnimationLoop((t) => {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  if (renderer.xr.isPresenting) { frames++; if (needRecenter && frames > 5) { recenter(); needRecenter = false; } }
+  scene.updateMatrixWorld();
+  if (renderer.xr.isPresenting) { updateHands(dt); updateControllers(); }
+  updateHover(); updateCards(dt); updateTimer(dt); updateOrb(t);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
