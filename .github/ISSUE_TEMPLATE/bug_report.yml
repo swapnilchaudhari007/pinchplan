@@ -1,0 +1,40 @@
+name: 🐛 Bug report
+description: Report something broken in PinchPlan
+title: '[Bug]: '
+labels:
+- bug
+body:
+- type: input
+  id: area
+  attributes:
+    label: Affected area
+    description: e.g. Hand tracking & pinch gestures, Passthrough / mixed reality, Focus timer & tasks
+  validations:
+    required: true
+- type: textarea
+  id: what
+  attributes:
+    label: What happened?
+    description: What did you expect, and what happened instead?
+  validations:
+    required: true
+- type: textarea
+  id: steps
+  attributes:
+    label: Steps to reproduce
+    placeholder: "1. \n2. \n3. "
+  validations:
+    required: true
+- type: input
+  id: device
+  attributes:
+    label: Headset and browser
+    placeholder: e.g. Quest 3, Meta Quest Browser 38
+  validations:
+    required: true
+- type: textarea
+  id: logs
+  attributes:
+    label: Logs or screenshots
+    description: Remove keys, tokens and personal data first.
+    render: shell
