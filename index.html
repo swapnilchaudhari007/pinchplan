@@ -102,6 +102,7 @@ const dl = new THREE.DirectionalLight(0xffffff, 1.4); dl.position.set(0.5, 1, 0.
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
+  if (!renderer.xr.isPresenting) desktopPose();
 });
 
 /* ---------------- canvas helpers ---------------- */
@@ -242,7 +243,10 @@ function advance(task) {
 }
 function drop(m) {
   const task = m.userData.task, p = m.position;
-  if (p.y < -0.2) { state.tasks.splice(state.tasks.indexOf(task), 1); beep(220, 0.15, 0.08); layout(); return; }
+  if (p.y < -0.2) {
+    const at = state.tasks.indexOf(task); state.tasks.splice(at, 1); beep(220, 0.15, 0.08); layout();
+    showUndo({ task, at }); return;
+  }
   let lane = 0, best = 1e9;
   LANE_X.forEach((x, i) => { const d = Math.abs(p.x - x); if (d < best) { best = d; lane = i; } });
   state.tasks.splice(state.tasks.indexOf(task), 1);
@@ -260,6 +264,18 @@ addBtn.position.set(0.215, 0.148, 0.004); board.add(addBtn);
 const clearBtn = makeButton('Clear done', 0.11, 0.034, clearDone, '#15803d');
 clearBtn.position.set(0.085, 0.148, 0.004); board.add(clearBtn);
 
+/* ---------------- undo delete ---------------- */
+let undoInfo = null, undoTimer = 0;
+const undoBtn = makeButton('↶ Undo delete', 0.13, 0.032, undoDelete, '#b45309');
+undoBtn.position.set(0.0, 0.21, 0.004); undoBtn.visible = false; board.add(undoBtn);
+function showUndo(info) { undoInfo = info; undoBtn.visible = true; clearTimeout(undoTimer); undoTimer = setTimeout(hideUndo, 6000); }
+function hideUndo() { undoInfo = null; undoBtn.visible = false; }
+function undoDelete() {
+  if (!undoInfo) return;
+  const { task, at } = undoInfo; state.tasks.splice(Math.min(at, state.tasks.length), 0, task);
+  clearTimeout(undoTimer); hideUndo(); layout();
+}
+
 /* ---------------- focus orb ---------------- */
 const orbGroup = new THREE.Group(); orbGroup.position.set(0.40, 0.02, 0.03); board.add(orbGroup);
 const orbMat = new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0ea5e9, emissiveIntensity: 0.6, roughness: 0.25, metalness: 0.1, transparent: true, opacity: 0.92 });
@@ -275,17 +291,25 @@ const presetBtns = [5, 15, 25].map((min, i) => {
 });
 const resetBtn = makeButton('Reset', 0.09, 0.028, resetTimer, '#7c2d12'); resetBtn.position.set(0, -0.106, 0); orbGroup.add(resetBtn);
 
-const timer = { running: false, remaining: state.minutes * 60, done: false, shown: -1 };
+const timer = { running: false, remaining: state.minutes * 60, done: false, shown: -1, endAt: 0 };
+if (state.timer) { // restore a session that was running or paused before reload / headset sleep
+  const t = state.timer;
+  if (t.running && t.endAt) { timer.endAt = t.endAt; timer.running = true; timer.remaining = Math.max(0, (t.endAt - Date.now()) / 1000); }
+  else if (t.remaining > 0) timer.remaining = t.remaining;
+}
+function saveTimer() { state.timer = { running: timer.running, endAt: timer.endAt, remaining: timer.remaining }; save(); }
 function setMinutes(min) {
   state.minutes = min; save();
   presetBtns.forEach((b, i) => { b.userData.color = [5, 15, 25][i] === min ? '#0369a1' : '#334155'; drawButton(b); });
-  if (!timer.running) { timer.remaining = min * 60; timer.done = false; drawOrbLabel(); }
+  if (!timer.running) { timer.remaining = min * 60; timer.done = false; drawOrbLabel(); saveTimer(); }
 }
 function toggleTimer() {
   if (timer.done) { timer.done = false; timer.remaining = state.minutes * 60; }
-  timer.running = !timer.running; beep(timer.running ? 660 : 440, 0.12); drawOrbLabel();
+  timer.running = !timer.running;
+  if (timer.running) timer.endAt = Date.now() + timer.remaining * 1000;
+  beep(timer.running ? 660 : 440, 0.12); drawOrbLabel(); saveTimer();
 }
-function resetTimer() { timer.running = false; timer.done = false; timer.remaining = state.minutes * 60; drawOrbLabel(); }
+function resetTimer() { timer.running = false; timer.done = false; timer.remaining = state.minutes * 60; drawOrbLabel(); saveTimer(); }
 function drawOrbLabel() {
   const c = orbLabel.userData.canvas, g = c.getContext('2d');
   g.clearRect(0, 0, c.width, c.height);
@@ -296,12 +320,12 @@ function drawOrbLabel() {
   g.fillText(timer.done ? 'Session complete! Pinch orb' : timer.running ? 'Focusing… pinch to pause' : 'Pinch orb to focus', c.width / 2, c.height * 0.8);
   orbLabel.userData.tex.needsUpdate = true; timer.shown = s;
 }
-function updateTimer(dt) {
+function updateTimer() {
   if (timer.running) {
-    timer.remaining -= dt;
+    timer.remaining = Math.max(0, (timer.endAt - Date.now()) / 1000); // wall clock: keeps counting while the headset sleeps
     if (timer.remaining <= 0) {
       timer.remaining = 0; timer.running = false; timer.done = true;
-      state.sessions++; save(); drawBoard(); chime(); drawOrbLabel();
+      state.sessions++; saveTimer(); drawBoard(); chime(); drawOrbLabel();
     }
   }
   if (Math.ceil(timer.remaining) !== timer.shown) drawOrbLabel();
@@ -338,7 +362,10 @@ function recenter() {
   board.position.copy(tmpV).addScaledVector(tmpV2, 0.5); board.position.y = tmpV.y - 0.2;
   board.lookAt(tmpV.x, board.position.y, tmpV.z); board.rotateX(-0.4);
 }
-function desktopPose() { board.position.set(innerWidth > 900 ? 0.1 : -0.04, -0.02, -0.72); board.rotation.set(0, 0, 0); }
+function desktopPose() {
+  const narrow = innerWidth <= 900;
+  board.position.set(narrow ? -0.04 : 0.1, narrow ? -0.12 : -0.02, narrow ? -1.1 : -0.72); board.rotation.set(0, 0, 0);
+}
 desktopPose();
 
 /* ---------------- generic pointer logic ---------------- */
@@ -539,7 +566,7 @@ renderer.setAnimationLoop((t) => {
   if (renderer.xr.isPresenting) { frames++; if (needRecenter && frames > 5) { recenter(); needRecenter = false; } }
   scene.updateMatrixWorld();
   if (renderer.xr.isPresenting) { updateHands(dt); updateControllers(); }
-  updateHover(); updateCards(dt); updateTimer(dt); updateOrb(t);
+  updateHover(); updateCards(dt); updateTimer(); updateOrb(t);
   renderer.render(scene, camera);
 });
 </script>
