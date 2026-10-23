@@ -1,5 +1,7 @@
 # PinchPlan – Hands-First Spatial Focus Desk
 
+![WebXR](https://img.shields.io/badge/WebXR-Meta%20Quest-0467DF?logo=meta&logoColor=white) ![Three.js](https://img.shields.io/badge/Three.js-r169-black?logo=threedotjs&logoColor=white) ![hackathon](https://img.shields.io/badge/hackathon-Meta%20VR%20Start%202026-purple) [![demo](https://img.shields.io/badge/demo-live-success)](https://swapnilchaudhari007.github.io/pinchplan/) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 A seated, hands-first mixed-reality task board and focus timer for Meta Quest, built with WebXR + Three.js.
 Entry for the Meta VR Start Developer Competition 2026 (Productivity track).
 
