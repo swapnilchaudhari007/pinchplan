@@ -2,6 +2,9 @@
 
 All notable changes to PinchPlan are documented here.
 
+## 2026-10-31
+- Added project docs: ROADMAP, CONTRIBUTING, SECURITY and CODE_OF_CONDUCT guides.
+
 ## 2026-10-26
 - Added this changelog to track releases and improvements.
 
