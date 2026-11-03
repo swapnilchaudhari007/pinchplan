@@ -2,6 +2,9 @@
 
 All notable changes to PinchPlan are documented here.
 
+## 2026-11-03
+- Added a Troubleshooting section to the README (MR button, hand tracking, recenter, local storage).
+
 ## 2026-10-31
 - Added project docs: ROADMAP, CONTRIBUTING, SECURITY and CODE_OF_CONDUCT guides.
 
