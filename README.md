@@ -40,3 +40,7 @@ See [LICENSE](LICENSE).
 **Board in the wrong place?** Turn your left palm up and choose Recenter from the wrist menu.
 
 **Tasks disappeared?** Tasks live in the browser's local storage on the headset, so clearing browsing data removes them.
+
+## Project docs
+
+[Changelog](CHANGELOG.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
