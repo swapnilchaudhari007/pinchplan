@@ -29,3 +29,14 @@ WebXR needs HTTPS on a headset — use the GitHub Pages link above, or a tunnel 
 
 ## License
 See [LICENSE](LICENSE).
+
+
+## Troubleshooting
+
+**No "Enter Mixed Reality" button?** Make sure you opened the HTTPS GitHub Pages link in the Meta Quest Browser. WebXR is blocked on plain HTTP.
+
+**Hands not detected?** Enable hand tracking in Quest Settings > Movement tracking, put the controllers down, and hold your hands in front of the headset.
+
+**Board in the wrong place?** Turn your left palm up and choose Recenter from the wrist menu.
+
+**Tasks disappeared?** Tasks live in the browser's local storage on the headset, so clearing browsing data removes them.
